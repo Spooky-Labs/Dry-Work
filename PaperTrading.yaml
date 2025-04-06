@@ -1,0 +1,69 @@
+# trading-agent.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-agent-${AGENT_ID}
+  namespace: trading-agents
+  labels:
+    app: trading-agent
+    agent-id: ${AGENT_ID}
+    creator-id: ${CREATOR_ID}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trading-agent
+      agent-id: ${AGENT_ID}
+  template:
+    metadata:
+      labels:
+        app: trading-agent
+        agent-id: ${AGENT_ID}
+    spec:
+      containers:
+      - name: agent
+        image: gcr.io/${PROJECT_ID}/trading-agent-${AGENT_ID}:latest
+        env:
+        - name: ALPACA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: alpaca-credentials
+              key: api-key
+        - name: ALPACA_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: alpaca-credentials
+              key: secret-key
+        - name: ALPACA_ACCOUNT_ID
+          valueFrom:
+            secretKeyRef:
+              name: alpaca-credentials
+              key: account-id
+        - name: AGENT_ID
+          value: ${AGENT_ID}
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: agent-state
+          mountPath: /var/lib/trading-agent
+      volumes:
+      - name: agent-state
+        persistentVolumeClaim:
+          claimName: agent-state-${AGENT_ID}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-state-${AGENT_ID}
+  namespace: trading-agents
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
