@@ -1,8 +1,3 @@
-# Remove these credentials after development
-# api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
-# secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
-# account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
-
 #!/usr/bin/env python3
 import backtrader as bt
 import logging
@@ -50,10 +45,15 @@ def write_heartbeat():
 def run_trading():
     """Run the trading agent"""
     # Get configuration from environment
-    api_key = os.environ.get('ALPACA_API_KEY')
-    secret_key = os.environ.get('ALPACA_SECRET_KEY')
-    account_id = os.environ.get('ALPACA_ACCOUNT_ID')
-    project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
+    # Remove these credentials after development
+    api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
+    secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
+    account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
+    project_id = "the-farm-neutrino"
+    # api_key = os.environ.get('ALPACA_API_KEY')
+    # secret_key = os.environ.get('ALPACA_SECRET_KEY')
+    # account_id = os.environ.get('ALPACA_ACCOUNT_ID')
+    # project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
     
     # Get polling interval from environment or use default
     try:
