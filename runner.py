@@ -57,12 +57,12 @@ def run_trading():
     
     # Get polling interval from environment or use default
     try:
-        polling_interval = float(os.environ.get('POLLING_INTERVAL', '1.0'))
-        # Ensure reasonable bounds (100ms to 60s)
-        polling_interval = max(0.1, min(60, polling_interval))
+        polling_interval = float(os.environ.get('POLLING_INTERVAL', '3600.0'))
+        # Ensure reasonable bounds (1 minute to 1 day)
+        polling_interval = max(60, min(86400, polling_interval))
     except ValueError:
-        logger.warning("Invalid polling interval, using default of 1.0 second")
-        polling_interval = 1.0
+        logger.warning("Invalid polling interval, using default of 60.0 second")
+        polling_interval = 60.0
     
     # Validate configuration
     if not all([api_key, secret_key, account_id, project_id]):

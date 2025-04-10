@@ -1,3 +1,6 @@
 alpaca-py
 backtrader
 google-cloud-pubsub
+numpy
+pandas
+pytz
