@@ -1,83 +1,171 @@
+# Remove these credentials after development
+# api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
+# secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
+# account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
+
 #!/usr/bin/env python3
 import backtrader as bt
-import os
+import logging
 import time
-from alpaca.data.timeframe import TimeFrame
+import signal
+import sys
+import os
+from datetime import datetime
 
-# Import custom components
-from broker import AlpacaMinimalBroker
-from data_feed import AlpacaMinimalData
+# Import our custom components
+from data_feed import DynamicPubSubFeed
+from broker import AlpacaPaperTradingBroker
 from agent.agent import Agent
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger('trader')
+
+# Global control flag
+running = True
+
+def signal_handler(sig, frame):
+    """Handle termination signals"""
+    global running
+    logger.info("Shutdown signal received")
+    running = False
+
+def write_heartbeat():
+    """Write a heartbeat file for health checks"""
+    try:
+        # Ensure directory exists
+        os.makedirs('/var/lib/trading-agent', exist_ok=True)
+        
+        # Write timestamp
+        heartbeat_file = '/var/lib/trading-agent/heartbeat'
+        with open(heartbeat_file, 'w') as f:
+            f.write(datetime.now().isoformat())
+    except Exception as e:
+        logger.warning(f"Failed to write heartbeat: {e}")
+        
 def run_trading():
-    """Simple paper trading implementation using Alpaca"""
-    # Get API credentials from environment
-    # api_key = os.environ.get('ALPACA_API_KEY')
-    # secret_key = os.environ.get('ALPACA_SECRET_KEY')
-    # account_id = os.environ.get('ALPACA_ACCOUNT_ID')
-
-    # Remove these credentials after development
-    api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
-    secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
-    account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
-
-    # Define trading symbols
-    symbols = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
-
-    # Initialize Cerebro
+    """Run the trading agent"""
+    # Get configuration from environment
+    api_key = os.environ.get('ALPACA_API_KEY')
+    secret_key = os.environ.get('ALPACA_SECRET_KEY')
+    account_id = os.environ.get('ALPACA_ACCOUNT_ID')
+    project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
+    
+    # Get polling interval from environment or use default
+    try:
+        polling_interval = float(os.environ.get('POLLING_INTERVAL', '1.0'))
+        # Ensure reasonable bounds (100ms to 60s)
+        polling_interval = max(0.1, min(60, polling_interval))
+    except ValueError:
+        logger.warning("Invalid polling interval, using default of 1.0 second")
+        polling_interval = 1.0
+    
+    # Validate configuration
+    if not all([api_key, secret_key, account_id, project_id]):
+        logger.error("Missing required environment variables")
+        return False
+    
+    # Load symbols
+    try:
+        with open("symbols.txt", "r") as f:
+            symbols = [line.strip() for line in f if line.strip()]
+        
+        if not symbols:
+            logger.error("No symbols defined in symbols.txt")
+            return False
+    except Exception as e:
+        logger.error(f"Error reading symbols: {e}")
+        return False
+    
+    # Initialize Backtrader
     cerebro = bt.Cerebro()
-
-    # Set up Alpaca broker
-    broker = AlpacaMinimalBroker(
+    
+    # Set up broker
+    cerebro.setbroker(AlpacaPaperTradingBroker(
         api_key=api_key,
         secret_key=secret_key,
         account_id=account_id
-    )
-    cerebro.setbroker(broker)
-
-    # Add strategy
-    cerebro.addstrategy(Agent, fast_period=10, slow_period=30)
-
+    ))
+    
     # Add data feeds for each symbol
     for symbol in symbols:
-        data = AlpacaMinimalData(
-            api_key=api_key,
-            secret_key=secret_key,
-            symbol=symbol,
-            timeframe=TimeFrame.Day
+        # Select appropriate topic
+        topic_name = 'crypto-data' if '/' in symbol else 'market-data'
+        
+        # Create data feed
+        data = DynamicPubSubFeed(
+            project_id=project_id,
+            topic_name=topic_name,
+            symbol=symbol
         )
         cerebro.adddata(data, name=symbol)
-        print(f"Added data feed for {symbol}")
+    
+    # Add agent strategy
+    cerebro.addstrategy(Agent)
 
-    # Initialize and run once
-    strategies = cerebro.run(stdstats=False)
-    print(f"Initial portfolio value: ${cerebro.broker.getvalue():.2f}")
-
-    # Simple trading loop
-    try:
-        while True:
-            # Refresh account data
-            broker.refresh_account()
+    # Add analyzers
+    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', 
+                       riskfreerate=0.01, timeframe=bt.TimeFrame.Days)
+    cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+    cerebro.addanalyzer(bt.analyzers.Calmar, _name='calmar')
+    cerebro.addanalyzer(bt.analyzers.SQN, _name='sqn')
+    cerebro.addanalyzer(bt.analyzers.AnnualReturn, _name='annualreturn')
+    
+    # Initialize
+    logger.info(f"Starting agent with {len(symbols)} symbols")
+    cerebro.run()
+    
+    # Record starting portfolio value
+    starting_value = cerebro.broker.getvalue()
+    logger.info(f"Initial portfolio value: ${starting_value:.2f}")
+    
+    # Write initial heartbeat
+    write_heartbeat()
+    
+    # Main trading loop
+    logger.info(f"Entering live trading loop (polling every {polling_interval}s)")
+    last_heartbeat = time.time()
+    
+    while running:
+        try:
+            # Process new data
+            cerebro.runonce()
             
-            # Process new data for each feed
-            for data in cerebro.datas:
-                data._load()  # Fetch latest data
+            # Update heartbeat every 5 minutes
+            now = time.time()
+            if now - last_heartbeat >= 300:
+                write_heartbeat()
+                last_heartbeat = now
+                
+                # Log current performance
+                current_value = cerebro.broker.getvalue()
+                logger.info(f"Portfolio value: ${current_value:.2f}")
             
-            # Execute strategy logic
-            cerebro.runstrategies()
-            
-            # Log current value
-            print(f"Current portfolio value: ${cerebro.broker.getvalue():.2f}")
-            
-            # Wait before next cycle
-            time.sleep(300)  # 5 minutes between updates
-            
-    except KeyboardInterrupt:
-        print("Trading stopped by user")
-    except Exception as e:
-        print(f"Error: {e}")
-
-    print(f"Final portfolio value: ${cerebro.broker.getvalue():.2f}")
+            # Wait for next polling interval
+            time.sleep(polling_interval)
+        except Exception as e:
+            logger.error(f"Error in trading loop: {e}")
+            time.sleep(polling_interval * 5)  # Longer delay on error
+    
+    # Clean up data feeds
+    for data in cerebro.datas:
+        if hasattr(data, 'stop'):
+            data.stop()
+    
+    logger.info("Trading agent stopped")
+    return True
 
 if __name__ == "__main__":
-    run_trading()
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Run the agent
+    success = run_trading()
+    sys.exit(0 if success else 1)
