@@ -1,16 +1,22 @@
-# data_feed.py
 import backtrader as bt
 import json
 import queue
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from google.cloud import pubsub_v1
 
-class DynamicPubSubFeed(bt.feeds.DataBase):
+logger = logging.getLogger(__name__)
+
+class PubSubMarketDataFeed(bt.feeds.DataBase):
     """
-    Data feed that automatically exposes all fields from PubSub messages
-    as Backtrader lines, making them directly accessible to the strategy.
+    Simplified data feed that consumes market data from Google Cloud Pub/Sub.
+    Focuses on core OHLCV data for reliable operation.
     """
     
+    # Define the lines
+    lines = ('open', 'high', 'low', 'close', 'volume')
+    
+    # Define parameters
     params = (
         ('project_id', None),     # GCP project ID
         ('topic_name', None),     # Pub/Sub topic name
@@ -18,116 +24,174 @@ class DynamicPubSubFeed(bt.feeds.DataBase):
     )
     
     def __init__(self):
-        super().__init__()
+        # Call parent class constructor
+        super(PubSubMarketDataFeed, self).__init__()
         
-        # Initialize standard OHLCV lines
-        self.lines.datetime = 0
-        self.lines.open = 0
-        self.lines.high = 0
-        self.lines.low = 0
-        self.lines.close = 0
-        self.lines.volume = 0
-        self.lines.openinterest = 0
-        
-        # Set up data buffer and track discovered fields
+        # Data buffer for incoming messages
         self._data_buffer = queue.Queue()
-        self._discovered_fields = set()
-        self._running = False
         self._subscription = None
+        self._subscriber = None
+        self._subscription_path = None
+        self._running = False
+        
+        logger.info(f"Initialized PubSub data feed for {self.p.symbol}")
     
     def start(self):
-        """Start receiving data from Pub/Sub"""
+        """Set up Pub/Sub subscription and start receiving data"""
         if self._running:
+            logger.warning(f"Data feed for {self.p.symbol} already running")
             return
+            
+        if not all([self.p.project_id, self.p.topic_name, self.p.symbol]):
+            raise ValueError("Missing required parameter: project_id, topic_name, or symbol")
         
-        # Set up the subscription
-        subscriber = pubsub_v1.SubscriberClient()
-        topic_path = f"projects/{self.p.project_id}/topics/{self.p.topic_name}"
-        subscription_id = f"feed-{self.p.symbol}-{id(self)}"
-        subscription_path = f"projects/{self.p.project_id}/subscriptions/{subscription_id}"
-        
-        # Create subscription if needed
         try:
-            subscriber.get_subscription(subscription=subscription_path)
-        except Exception:
-            subscriber.create_subscription(
-                request={
-                    "name": subscription_path,
-                    "topic": topic_path,
-                    "filter": f"attributes.symbol = \"{self.p.symbol}\""
-                }
-            )
-        
-        # Define message handler
-        def callback(message):
+            # Create a subscriber client
+            self._subscriber = pubsub_v1.SubscriberClient()
+            
+            # Define topic and subscription paths
+            topic_path = f"projects/{self.p.project_id}/topics/{self.p.topic_name}"
+            
+            # Create a unique subscription for this feed instance
+            subscription_id = f"feed-{self.p.symbol}-{id(self):x}"
+            self._subscription_path = f"projects/{self.p.project_id}/subscriptions/{subscription_id}"
+            
+            # Create subscription with a filter for the specific symbol
             try:
-                data = json.loads(message.data.decode('utf-8'))
-                self._data_buffer.put(data)
-                message.ack()
-                
-                # Check for new fields to add dynamically
-                self._check_new_fields(data)
+                self._subscriber.create_subscription(
+                    request={
+                        "name": self._subscription_path,
+                        "topic": topic_path,
+                        "filter": f"attributes.symbol = \"{self.p.symbol}\"",
+                        "expiration_policy": {"ttl": {"seconds": 86400}}  # Auto-delete after 24 hours (minimum required)
+                    }
+                )
+                logger.info(f"Created subscription: {self._subscription_path}")
             except Exception as e:
-                print(f"Error processing message: {e}")
-                message.nack()
-        
-        # Start subscription
-        self._subscription = subscriber.subscribe(
-            subscription_path, callback=callback
-        )
-        self._running = True
-    
-    def _check_new_fields(self, data):
-        """Check for new fields in the message and add lines for them"""
-        for field_name, value in data.items():
-            # Skip standard fields and non-numeric values
-            if field_name in ('open', 'high', 'low', 'close', 'volume', 'timestamp'):
-                continue
-                
-            if field_name not in self._discovered_fields and isinstance(value, (int, float)):
-                self._discovered_fields.add(field_name)
-                
-                # Create a new line for this field
-                self.addline(field_name)
-                
-                # Initialize with default value
-                line = getattr(self.lines, field_name)
-                line[0] = 0
+                logger.error(f"Error creating subscription: {e}")
+                raise
+            
+            # Define the callback function for handling messages
+            def handle_message(message):
+                try:
+                    # Decode message data
+                    data_str = message.data.decode('utf-8')
+                    data = json.loads(data_str)
+                    
+                    # Add to buffer
+                    self._data_buffer.put(data)
+                    
+                    # Acknowledge the message
+                    message.ack()
+                    
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid JSON in message: {message.data}")
+                    message.nack()
+                except Exception as e:
+                    logger.error(f"Error processing message: {e}")
+                    message.nack()
+            
+            # Start the subscription
+            logger.info(f"Starting subscription for {self.p.symbol}")
+            self._subscription = self._subscriber.subscribe(
+                self._subscription_path, callback=handle_message
+            )
+            
+            self._running = True
+            logger.info(f"Data feed started for {self.p.symbol}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start data feed: {e}")
+            self.stop()
+            raise
     
     def stop(self):
-        """Stop receiving data"""
+        """Clean up resources"""
         if not self._running:
             return
+            
+        logger.info(f"Stopping data feed for {self.p.symbol}")
         
         # Cancel subscription
         if self._subscription:
             self._subscription.cancel()
+            self._subscription = None
         
+        # Delete the subscription
+        if self._subscriber and self._subscription_path:
+            try:
+                self._subscriber.delete_subscription(
+                    request={"subscription": self._subscription_path}
+                )
+                logger.info(f"Deleted subscription: {self._subscription_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete subscription: {e}")
+        
+        # Close subscriber client
+        if self._subscriber:
+            self._subscriber.close()
+            self._subscriber = None
+            
         self._running = False
+        logger.info(f"Data feed stopped for {self.p.symbol}")
     
     def _load(self):
-        """Called by Backtrader when it needs new data"""
-        if not self._running or self._data_buffer.empty():
+        """
+        Called by Backtrader when it needs new data.
+        Returns True if new data was loaded, False otherwise.
+        """
+        if not self._running:
+            logger.warning(f"Data feed not running for {self.p.symbol}")
+            return False
+            
+        if self._data_buffer.empty():
             return False
         
-        # Get next message from buffer
-        data = self._data_buffer.get()
-        
-        # Always update datetime (required by Backtrader)
-        timestamp = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
-        self.lines.datetime[0] = bt.date2num(timestamp)
-        
-        # Update standard price fields if present
-        if 'open' in data: self.lines.open[0] = float(data['open'])
-        if 'high' in data: self.lines.high[0] = float(data['high']) 
-        if 'low' in data: self.lines.low[0] = float(data['low'])
-        if 'close' in data: self.lines.close[0] = float(data['close'])
-        if 'volume' in data: self.lines.volume[0] = float(data['volume'])
-        
-        # Update any additional fields
-        for field_name in self._discovered_fields:
-            if field_name in data and hasattr(self.lines, field_name):
-                line = getattr(self.lines, field_name)
-                line[0] = float(data.get(field_name, 0))
-        
-        return True
+        try:
+            # Get next message from buffer
+            data = self._data_buffer.get(block=False)
+            
+            # Update datetime (required by Backtrader)
+            if 'timestamp' in data:
+                try:
+                    # Parse timestamp, assuming ISO format with potential timezone info
+                    timestamp_str = data['timestamp']
+                    # Handle timestamp with or without timezone
+                    if timestamp_str.endswith('Z'):
+                        timestamp_str = timestamp_str.replace('Z', '+00:00')
+                    
+                    dt = datetime.fromisoformat(timestamp_str)
+                    # Ensure timezone is set if not already
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                        
+                    # Convert to Backtrader's numeric format
+                    self.lines.datetime[0] = bt.date2num(dt)
+                except ValueError as e:
+                    logger.error(f"Invalid timestamp format in message: {e}")
+                    return False
+            else:
+                # If no timestamp, use current time
+                self.lines.datetime[0] = bt.date2num(datetime.now(timezone.utc))
+            
+            # Update price data
+            try:
+                if 'open' in data:
+                    self.lines.open[0] = float(data['open'])
+                if 'high' in data:
+                    self.lines.high[0] = float(data['high'])
+                if 'low' in data:
+                    self.lines.low[0] = float(data['low'])
+                if 'close' in data:
+                    self.lines.close[0] = float(data['close'])
+                if 'volume' in data:
+                    self.lines.volume[0] = float(data['volume'])
+            except (ValueError, TypeError) as e:
+                logger.error(f"Invalid data format in message: {e}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading data: {e}")
+            return False

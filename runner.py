@@ -1,3 +1,13 @@
+# Remove these credentials after development
+api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
+secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
+account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
+project_id = "the-farm-neutrino"
+# api_key = os.environ.get('ALPACA_API_KEY')
+# secret_key = os.environ.get('ALPACA_SECRET_KEY')
+# account_id = os.environ.get('ALPACA_ACCOUNT_ID')
+# project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
+
 #!/usr/bin/env python3
 import backtrader as bt
 import logging
@@ -8,23 +18,22 @@ import os
 from datetime import datetime
 
 # Import our custom components
-from data_feed import DynamicPubSubFeed
+from data_feed import PubSubMarketDataFeed
 from broker import AlpacaPaperTradingBroker
 from agent.agent import Agent
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('trader')
+logger = logging.getLogger('trading_agent')
 
-# Global control flag
+# Global control flag for graceful shutdown
 running = True
 
 def signal_handler(sig, frame):
-    """Handle termination signals"""
+    """Handle termination signals for graceful shutdown"""
     global running
     logger.info("Shutdown signal received")
     running = False
@@ -32,109 +41,100 @@ def signal_handler(sig, frame):
 def write_heartbeat():
     """Write a heartbeat file for health checks"""
     try:
-        # Ensure directory exists
         os.makedirs('/var/lib/trading-agent', exist_ok=True)
-        
-        # Write timestamp
         heartbeat_file = '/var/lib/trading-agent/heartbeat'
         with open(heartbeat_file, 'w') as f:
             f.write(datetime.now().isoformat())
     except Exception as e:
         logger.warning(f"Failed to write heartbeat: {e}")
-        
-def run_trading():
-    """Run the trading agent"""
-    # Get configuration from environment
-    # Remove these credentials after development
-    api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
-    secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
-    account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
-    project_id = "the-farm-neutrino"
+
+def get_symbols():
+    """Read symbols from the symbols.txt file"""
+    try:
+        with open("symbols.txt", "r") as f:
+            return [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        logger.error(f"Error reading symbols file: {e}")
+        return []
+
+def run_agent():
+    """Main function to run the trading agent"""
+    # Get configuration from environment variables
     # api_key = os.environ.get('ALPACA_API_KEY')
     # secret_key = os.environ.get('ALPACA_SECRET_KEY')
     # account_id = os.environ.get('ALPACA_ACCOUNT_ID')
     # project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
     
-    # Get polling interval from environment or use default
-    try:
-        polling_interval = float(os.environ.get('POLLING_INTERVAL', '3600.0'))
-        # Ensure reasonable bounds (1 minute to 1 day)
-        polling_interval = max(60, min(86400, polling_interval))
-    except ValueError:
-        logger.warning("Invalid polling interval, using default of 60.0 second")
-        polling_interval = 60.0
+    # Default poll interval 60 seconds
+    poll_interval = float(os.environ.get('POLL_INTERVAL', '60'))
     
-    # Validate configuration
+    # Validate configuration 
     if not all([api_key, secret_key, account_id, project_id]):
         logger.error("Missing required environment variables")
         return False
     
-    # Load symbols
-    try:
-        with open("symbols.txt", "r") as f:
-            symbols = [line.strip() for line in f if line.strip()]
-        
-        if not symbols:
-            logger.error("No symbols defined in symbols.txt")
-            return False
-    except Exception as e:
-        logger.error(f"Error reading symbols: {e}")
+    # Get symbols to trade
+    symbols = get_symbols()
+    if not symbols:
+        logger.error("No symbols found in symbols.txt")
         return False
     
-    # Initialize Backtrader
+    logger.info(f"Starting agent with {len(symbols)} symbols")
+    
+    # Create Cerebro instance with special settings for live trading
     cerebro = bt.Cerebro()
+    cerebro.addstrategy(Agent)
     
     # Set up broker
-    cerebro.setbroker(AlpacaPaperTradingBroker(
+    broker = AlpacaPaperTradingBroker(
         api_key=api_key,
         secret_key=secret_key,
         account_id=account_id
-    ))
+    )
+    cerebro.setbroker(broker)
     
-    # Add data feeds for each symbol
+    # Add data feeds
     for symbol in symbols:
-        # Select appropriate topic
+        # Determine topic name based on symbol format (crypto vs stock)
         topic_name = 'crypto-data' if '/' in symbol else 'market-data'
         
         # Create data feed
-        data = DynamicPubSubFeed(
+        data = PubSubMarketDataFeed(
             project_id=project_id,
             topic_name=topic_name,
             symbol=symbol
         )
         cerebro.adddata(data, name=symbol)
-    
-    # Add agent strategy
-    cerebro.addstrategy(Agent)
-
-    # Add analyzers
-    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', 
-                       riskfreerate=0.01, timeframe=bt.TimeFrame.Days)
-    cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
-    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
-    cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
-    cerebro.addanalyzer(bt.analyzers.Calmar, _name='calmar')
-    cerebro.addanalyzer(bt.analyzers.SQN, _name='sqn')
-    cerebro.addanalyzer(bt.analyzers.AnnualReturn, _name='annualreturn')
-    
-    # Initialize
-    logger.info(f"Starting agent with {len(symbols)} symbols")
-    cerebro.run()
+        logger.info(f"Added data feed for {symbol}")
     
     # Record starting portfolio value
     starting_value = cerebro.broker.getvalue()
     logger.info(f"Initial portfolio value: ${starting_value:.2f}")
     
+    # First initialize the strategy
+    logger.info("Initializing strategy")
+    cerebro.run(runonce=False, preload=False, writer=False)
+    
+    # Then start all data feeds
+    logger.info("Starting data feeds")
+    for data in cerebro.datas:
+        try:
+            data.start()
+        except Exception as e:
+            logger.error(f"Error starting data feed for {data._name}: {e}")
+            # Continue with other data feeds
+    
     # Write initial heartbeat
     write_heartbeat()
     
     # Main trading loop
-    logger.info(f"Entering live trading loop (polling every {polling_interval}s)")
+    logger.info(f"Entering live trading loop (polling every {poll_interval}s)")
     last_heartbeat = time.time()
+    last_report = time.time()
     
-    while running:
-        try:
-            # Process new data
+    try:
+        while running:
+            # Process any new data
             cerebro.runonce()
             
             # Update heartbeat every 5 minutes
@@ -142,23 +142,36 @@ def run_trading():
             if now - last_heartbeat >= 300:
                 write_heartbeat()
                 last_heartbeat = now
-                
-                # Log current performance
-                current_value = cerebro.broker.getvalue()
-                logger.info(f"Portfolio value: ${current_value:.2f}")
             
-            # Wait for next polling interval
-            time.sleep(polling_interval)
-        except Exception as e:
-            logger.error(f"Error in trading loop: {e}")
-            time.sleep(polling_interval * 5)  # Longer delay on error
+            # Log portfolio value every hour
+            if now - last_report >= 3600:
+                current_value = cerebro.broker.getvalue()
+                pnl = current_value - starting_value
+                logger.info(f"Portfolio value: ${current_value:.2f} (P&L: ${pnl:.2f})")
+                last_report = now
+            
+            # Process order status
+            cerebro.broker.notify()
+            
+            # Poll interval
+            time.sleep(poll_interval)
     
-    # Clean up data feeds
-    for data in cerebro.datas:
-        if hasattr(data, 'stop'):
-            data.stop()
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}", exc_info=True)
+    finally:
+        # Clean up resources
+        logger.info("Shutting down agent...")
+        for data in cerebro.datas:
+            try:
+                if hasattr(data, 'stop'):
+                    data.stop()
+            except Exception as e:
+                logger.error(f"Error stopping data feed for {data._name}: {e}")
+        
+        logger.info("Agent shutdown complete")
     
-    logger.info("Trading agent stopped")
     return True
 
 if __name__ == "__main__":
@@ -167,5 +180,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, signal_handler)
     
     # Run the agent
-    success = run_trading()
+    success = run_agent()
     sys.exit(0 if success else 1)
