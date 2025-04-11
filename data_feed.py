@@ -24,11 +24,12 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
     )
     
     def __init__(self):
-        self._laststatus = self.LIVE
-
         # Call parent class constructor
         super(PubSubMarketDataFeed, self).__init__()
         
+        # For Live Trading
+        self._laststatus = self.LIVE
+
         # Data buffer for incoming messages
         self._data_buffer = queue.Queue()
         self._subscription = None

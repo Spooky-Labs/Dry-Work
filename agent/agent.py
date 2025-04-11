@@ -8,6 +8,7 @@ class Agent(bt.Strategy):
     
     def __init__(self):
         # Create indicators
+        print("Agent Initialized")
         for d in self.datas:
             d.fast_ma = bt.indicators.SMA(d, period=self.params.fast_period)
             d.slow_ma = bt.indicators.SMA(d, period=self.params.slow_period)
