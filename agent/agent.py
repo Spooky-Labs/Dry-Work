@@ -26,12 +26,14 @@ class Agent(bt.Strategy):
     def next(self):
         logger.info("Next method called")
         for d in self.datas:
-            logger.info(f"Checking {d}")
-            if not self.getposition(d).size:  # No position
-                if d.crossover > 0:  # Buy signal
-                    size = int(self.broker.getcash() * 0.15 / d.close[0])
-                    self.buy(data=d, size=size)
-                    logger.info(f"Bought: {size} of {d}")
-            elif d.crossover < 0:  # Sell signal
-                self.close(data=d)
-                logger.info(f"Sold: {size} of {d}")
+            logger.info(f"Checking data")
+            size = int(self.broker.getcash() * 0.15 / d.close[0])
+            self.buy(data=d, size=size)
+            # if not self.getposition(d).size:  # No position
+            #     if d.crossover > 0:  # Buy signal
+            #         size = int(self.broker.getcash() * 0.15 / d.close[0])
+            #         self.buy(data=d, size=size)
+            #         logger.info(f"Bought: {size} of {d}")
+            # elif d.crossover < 0:  # Sell signal
+            #     self.close(data=d)
+            #     logger.info(f"Sold: {size} of {d}")
