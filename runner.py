@@ -3,6 +3,7 @@ api_key = "CKI6JH8CDEZIIO3T7BK5" # Broker Keys
 secret_key = "X4TCzbWAcmkabqps7XRpc7vIk7oasVlmFwbdmCGo" # Broker secret key
 account_id = "105830c9-e690-4549-8d66-3048a3c5c6a2" # Account ID for Eloquent Swanson ACCT #: 789220144
 project_id = "the-farm-neutrino"
+poll_interval = 60
 # api_key = os.environ.get('ALPACA_API_KEY')
 # secret_key = os.environ.get('ALPACA_SECRET_KEY')
 # account_id = os.environ.get('ALPACA_ACCOUNT_ID')
@@ -29,8 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('trading_agent')
 
-# Global control flag for graceful shutdown
-running = True
 
 def signal_handler(sig, frame):
     """Handle termination signals for graceful shutdown"""
@@ -49,19 +48,6 @@ def get_symbols():
 
 def run_agent():
     """Main function to run the trading agent"""
-    # Get configuration from environment variables
-    # api_key = os.environ.get('ALPACA_API_KEY')
-    # secret_key = os.environ.get('ALPACA_SECRET_KEY')
-    # account_id = os.environ.get('ALPACA_ACCOUNT_ID')
-    # project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
-    
-    # Default poll interval 60 seconds
-    poll_interval = float(os.environ.get('POLL_INTERVAL', '60'))
-    
-    # Validate configuration 
-    if not all([api_key, secret_key, account_id, project_id]):
-        logger.error("Missing required environment variables")
-        return False
     
     # Get symbols to trade
     symbols = get_symbols()
@@ -72,7 +58,7 @@ def run_agent():
     logger.info(f"Starting agent with {len(symbols)} symbols")
     
     # Create Cerebro instance with special settings for live trading
-    cerebro = bt.Cerebro()
+    cerebro = bt.Cerebro(stdstats=False)
     cerebro.addstrategy(Agent)
     
     # Set up broker
@@ -92,7 +78,7 @@ def run_agent():
         data = PubSubMarketDataFeed(
             project_id=project_id,
             topic_name=topic_name,
-            symbol=symbol
+            symbol=symbol,
         )
         cerebro.adddata(data, name=symbol)
         logger.info(f"Added data feed for {symbol}")
@@ -103,43 +89,28 @@ def run_agent():
     
     # First initialize the strategy
     logger.info("Initializing strategy")
-    cerebro.run(
-        preload=False,     # Don't preload data
-        runonce=False,     # Don't use runonce optimization
-        live=True,         # Live trading mode
-        exactbars=True     # Process each bar as it arrives
-    )
-    
-    # Then start all data feeds
-    logger.info("Starting data feeds")
-    for data in cerebro.datas:
-        try:
-            data.start()
-        except Exception as e:
-            logger.error(f"Error starting data feed for {data._name}: {e}")
-            # Continue with other data feeds
-    
-    # Main trading loop
-    logger.info(f"Entering live trading loop (polling every {poll_interval}s)")
-    
+
     try:
-        while running:
-            # Process any new data
-            cerebro.runonce()
-            
-            # Process order status
-            cerebro.broker.notify()
-            
-            # Poll interval
-            time.sleep(poll_interval)
-    
+        # Run the live trading engine - Backtrader handles the loop
+        logger.info("Starting live trading engine...")
+        cerebro.run(live=True) # REMOVED the preload/runonce/exactbars here for simplicity, live=True implies much of this.
+
+        # --- The code will block here until Cerebro finishes (e.g., by signal) ---
+
+        logger.info("Trading engine finished.")
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
     except Exception as e:
-        logger.error(f"Error in main loop: {e}", exc_info=True)
+        logger.error(f"Error during Cerebro run: {e}", exc_info=True)
     finally:
+        # (Optional but good) Clean up resources if needed,
+        # though Cerebro/data feeds might handle their own shutdown.
+        # Data feed stop calls might be handled by Cerebro's exit.
+        logger.info("Agent shutdown process starting...")
+        # Explicitly stopping feeds might still be useful depending on implementation
+        # for data in cerebro.datas:
+        #     if hasattr(data, 'stop'): data.stop()
         # Clean up resources
-        logger.info("Shutting down agent...")
         for data in cerebro.datas:
             try:
                 if hasattr(data, 'stop'):
@@ -149,6 +120,10 @@ def run_agent():
         
         logger.info("Agent shutdown complete")
     
+    # Record final value
+    final_value = cerebro.broker.getvalue()
+    logger.info(f"Final portfolio value: ${final_value:.2f}")
+
     return True
 
 if __name__ == "__main__":
