@@ -54,6 +54,16 @@ class AlpacaPaperTradingBroker(bt.BrokerBase):
         
         # Set starting cash after initial refresh
         self.startingcash = self._cash
+
+        self.notifications = []
+
+    def get_notification(self):
+        if self.notifications:
+            return self.notifications.pop(0)
+        return None
+
+    def notify_order_event(self, order_event):
+        self.notifications.append(order_event)
     
     def refresh_account(self):
         """Fetch latest account information from Alpaca"""

@@ -1,2 +1,4 @@
 AAPL
 X
+BTC/USD
+ETH/USD

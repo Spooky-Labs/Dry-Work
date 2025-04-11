@@ -14,6 +14,7 @@ class Agent(bt.Strategy):
             d.crossover = bt.indicators.CrossOver(d.fast_ma, d.slow_ma)
     
     def next(self):
+        print(f"[{self.datetime.datetime(0)}] Got bar for {self.datas[0]._name}: close={self.datas[0].close[0]}")
         for d in self.datas:
             if not self.getposition(d).size:  # No position
                 if d.crossover > 0:  # Buy signal

@@ -32,6 +32,16 @@ logger = logging.getLogger('trading_agent')
 # Global control flag for graceful shutdown
 running = True
 
+def wait_for_first_bar(cerebro, timeout=30):
+    log = logging.getLogger("trading_agent")
+    start = time.time()
+    while all(len(data) == 0 for data in cerebro.datas):
+        if time.time() - start > timeout:
+            log.warning("Timeout waiting for bars — continuing anyway.")
+            break
+        time.sleep(0.5)
+    log.info("Bar received — running strategy.")
+
 def signal_handler(sig, frame):
     """Handle termination signals for graceful shutdown"""
     global running
@@ -82,7 +92,7 @@ def run_agent():
     logger.info(f"Starting agent with {len(symbols)} symbols")
     
     # Create Cerebro instance with special settings for live trading
-    cerebro = bt.Cerebro()
+    cerebro = bt.Cerebro(cheat_on_open=True)
     cerebro.addstrategy(Agent)
     
     # Set up broker
@@ -135,7 +145,8 @@ def run_agent():
     try:
         while running:
             # Process any new data
-            cerebro.runonce()
+            wait_for_first_bar(cerebro)
+            cerebro.run()
             
             # Update heartbeat every 5 minutes
             now = time.time()

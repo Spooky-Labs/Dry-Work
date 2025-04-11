@@ -24,6 +24,8 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
     )
     
     def __init__(self):
+        self._laststatus = self.LIVE
+
         # Call parent class constructor
         super(PubSubMarketDataFeed, self).__init__()
         
@@ -35,6 +37,12 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
         self._running = False
         
         logger.info(f"Initialized PubSub data feed for {self.p.symbol}")
+
+    def islive(self):
+        return True
+    
+    def haslivedata(self):
+        return True
     
     def start(self):
         """Set up Pub/Sub subscription and start receiving data"""
@@ -53,7 +61,7 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
             topic_path = f"projects/{self.p.project_id}/topics/{self.p.topic_name}"
             
             # Create a unique subscription for this feed instance
-            subscription_id = f"feed-{self.p.symbol}-{id(self):x}"
+            subscription_id = f"feed-{self.p.symbol.replace("/", "-")}-{id(self):x}"
             self._subscription_path = f"projects/{self.p.project_id}/subscriptions/{subscription_id}"
             
             # Create subscription with a filter for the specific symbol
@@ -62,7 +70,7 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
                     request={
                         "name": self._subscription_path,
                         "topic": topic_path,
-                        "filter": f"attributes.symbol = \"{self.p.symbol}\"",
+                        "filter": f"attributes.symbol = \"{self.p.symbol.replace("/", "-")}\"",
                         "expiration_policy": {"ttl": {"seconds": 86400}}  # Auto-delete after 24 hours (minimum required)
                     }
                 )
@@ -75,6 +83,8 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
             def handle_message(message):
                 try:
                     # Decode message data
+                    logger.info(f"[HANDLE_MESSAGE] Received for {self.p.symbol}: {message.data}")
+
                     data_str = message.data.decode('utf-8')
                     data = json.loads(data_str)
                     
@@ -140,6 +150,11 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
         Called by Backtrader when it needs new data.
         Returns True if new data was loaded, False otherwise.
         """
+
+        # if not getattr(self, '_st_start', False):
+        #     self._st_start = True
+        self._laststatus = self.LIVE
+
         if not self._running:
             logger.warning(f"Data feed not running for {self.p.symbol}")
             return False
