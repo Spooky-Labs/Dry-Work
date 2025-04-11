@@ -28,7 +28,7 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
         super(PubSubMarketDataFeed, self).__init__()
         
         # For Live Trading
-        self._laststatus = self.LIVE
+        self._laststatus = self.DELAYED
 
         # Data buffer for incoming messages
         self._data_buffer = queue.Queue()
@@ -80,6 +80,9 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
                 logger.error(f"Error creating subscription: {e}")
                 raise
             
+            # Mark initial state as DELAYED (not LIVE yet)
+            self._state = self.DELAYED
+
             # Define the callback function for handling messages
             def handle_message(message):
                 try:
@@ -91,6 +94,11 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
                     
                     # Add to buffer
                     self._data_buffer.put(data)
+
+                    # Mark feed as LIVE if it wasn't already
+                    if self._state != self.LIVE:
+                        self._state = self.LIVE
+                        self.put_notification(self.LIVE)
                     
                     # Acknowledge the message
                     message.ack()
@@ -149,11 +157,11 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
     def _load(self):
         """
         Called by Backtrader when it needs new data.
-        Returns True if new data was loaded, False otherwise.
+        Returns:
+          - True when new data is loaded
+          - False when no more data (end of historical data)
+          - None when no new data is available now, but might be in future
         """
-
-        # if not getattr(self, '_st_start', False):
-        #     self._st_start = True
         self._laststatus = self.LIVE
 
         if not self._running:
