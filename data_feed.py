@@ -81,9 +81,10 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
 
                 # Mark feed as LIVE if it wasn't already
                 if self._state != self.LIVE:
+                    logger.error(f"Changing State from: {self._state} to {self.LIVE}")
                     self._state = self.LIVE
-                    self.put_notification(self.LIVE)
-                
+                    self.put_notification(self._state)
+
                 # Acknowledge the message
                 message.ack()
             except Exception as e:
