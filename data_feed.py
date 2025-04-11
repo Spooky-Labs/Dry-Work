@@ -29,6 +29,7 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
         
         # For Live Trading
         self._laststatus = self.DELAYED
+        self._state = self.DELAYED
 
         # Data buffer for incoming messages
         self._data_buffer = queue.Queue()
@@ -42,87 +43,61 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
     def islive(self):
         return True
     
-    def haslivedata(self):
-        return True
+    # def haslivedata(self):
+    #     return True
     
     def start(self):
         """Set up Pub/Sub subscription and start receiving data"""
         if self._running:
-            logger.warning(f"Data feed for {self.p.symbol} already running")
             return
-            
-        if not all([self.p.project_id, self.p.topic_name, self.p.symbol]):
-            raise ValueError("Missing required parameter: project_id, topic_name, or symbol")
         
-        try:
-            # Create a subscriber client
-            self._subscriber = pubsub_v1.SubscriberClient()
-            
-            # Define topic and subscription paths
-            topic_path = f"projects/{self.p.project_id}/topics/{self.p.topic_name}"
-            
-            # Create a unique subscription for this feed instance
-            subscription_id = f"feed-{self.p.symbol.replace("/", "-")}-{id(self):x}"
-            self._subscription_path = f"projects/{self.p.project_id}/subscriptions/{subscription_id}"
-            
-            # Create subscription with a filter for the specific symbol
+        # Create a subscriber client
+        self._subscriber = pubsub_v1.SubscriberClient()
+        # Define topic and subscription paths
+        topic_path = f"projects/{self.p.project_id}/topics/{self.p.topic_name}"
+        # Create a unique subscription for this feed instance
+        subscription_id = f"feed-{self.p.symbol.replace("/", "-")}-{id(self):x}"
+        self._subscription_path = f"projects/{self.p.project_id}/subscriptions/{subscription_id}"
+
+        self._subscriber.create_subscription(
+            request={
+                "name": self._subscription_path,
+                "topic": topic_path,
+                "filter": f"attributes.symbol = \"{self.p.symbol.replace("/", "-")}\"",
+                "expiration_policy": {"ttl": {"seconds": 86400}}  # Auto-delete after 24 hours (minimum required)
+            }
+        )
+        logger.info(f"Created subscription: {self._subscription_path}")
+
+        # Define the callback function for handling messages
+        def handle_message(message):
             try:
-                self._subscriber.create_subscription(
-                    request={
-                        "name": self._subscription_path,
-                        "topic": topic_path,
-                        "filter": f"attributes.symbol = \"{self.p.symbol.replace("/", "-")}\"",
-                        "expiration_policy": {"ttl": {"seconds": 86400}}  # Auto-delete after 24 hours (minimum required)
-                    }
-                )
-                logger.info(f"Created subscription: {self._subscription_path}")
+                # Decode message data
+                logger.info(f"[HANDLE_MESSAGE] Received for {self.p.symbol}: {message.data}")
+                data_str = message.data.decode('utf-8')
+                data = json.loads(data_str)
+                # Add to buffer
+                self._data_buffer.put(data)
+
+                # Mark feed as LIVE if it wasn't already
+                if self._state != self.LIVE:
+                    self._state = self.LIVE
+                    self.put_notification(self.LIVE)
+                
+                # Acknowledge the message
+                message.ack()
             except Exception as e:
-                logger.error(f"Error creating subscription: {e}")
-                raise
+                logger.error(f"Error processing message: {e}")
+                message.nack()
             
-            # Mark initial state as DELAYED (not LIVE yet)
-            self._state = self.DELAYED
-
-            # Define the callback function for handling messages
-            def handle_message(message):
-                try:
-                    # Decode message data
-                    logger.info(f"[HANDLE_MESSAGE] Received for {self.p.symbol}: {message.data}")
-
-                    data_str = message.data.decode('utf-8')
-                    data = json.loads(data_str)
-                    
-                    # Add to buffer
-                    self._data_buffer.put(data)
-
-                    # Mark feed as LIVE if it wasn't already
-                    if self._state != self.LIVE:
-                        self._state = self.LIVE
-                        self.put_notification(self.LIVE)
-                    
-                    # Acknowledge the message
-                    message.ack()
-                    
-                except json.JSONDecodeError:
-                    logger.error(f"Invalid JSON in message: {message.data}")
-                    message.nack()
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    message.nack()
-            
-            # Start the subscription
-            logger.info(f"Starting subscription for {self.p.symbol}")
-            self._subscription = self._subscriber.subscribe(
-                self._subscription_path, callback=handle_message
-            )
-            
-            self._running = True
-            logger.info(f"Data feed started for {self.p.symbol}")
-            
-        except Exception as e:
-            logger.error(f"Failed to start data feed: {e}")
-            self.stop()
-            raise
+        # Start the subscription
+        logger.info(f"Starting subscription for {self.p.symbol}")
+        self._subscription = self._subscriber.subscribe(
+            self._subscription_path, callback=handle_message
+        )
+        
+        self._running = True
+        logger.info(f"Data feed started for {self.p.symbol}")
     
     def stop(self):
         """Clean up resources"""
@@ -155,21 +130,13 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
         logger.info(f"Data feed stopped for {self.p.symbol}")
     
     def _load(self):
-        """
-        Called by Backtrader when it needs new data.
-        Returns:
-          - True when new data is loaded
-          - False when no more data (end of historical data)
-          - None when no new data is available now, but might be in future
-        """
-        self._laststatus = self.LIVE
-
+        """Process incoming market data."""
         if not self._running:
             logger.warning(f"Data feed not running for {self.p.symbol}")
             return False
             
         if self._data_buffer.empty():
-            return False
+            return None  # Critical: Return None, not False when waiting for data
         
         try:
             # Get next message from buffer
