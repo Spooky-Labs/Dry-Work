@@ -43,8 +43,8 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
     def islive(self):
         return True
     
-    # def haslivedata(self):
-    #     return True
+    def haslivedata(self):
+        return True
     
     def start(self):
         """Set up Pub/Sub subscription and start receiving data"""
@@ -141,7 +141,6 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
         try:
             # Get next message from buffer
             data = self._data_buffer.get(block=False)
-            
             # Update datetime (required by Backtrader)
             if 'timestamp' in data:
                 try:
@@ -180,7 +179,6 @@ class PubSubMarketDataFeed(bt.feeds.DataBase):
             except (ValueError, TypeError) as e:
                 logger.error(f"Invalid data format in message: {e}")
                 return False
-                
             return True
             
         except Exception as e:
